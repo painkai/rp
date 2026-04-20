@@ -1,0 +1,8 @@
+.env
+.claude/
+.venv/
+__pycache__/
+*.pyc
+images/
+*.jpg
+*.mp4

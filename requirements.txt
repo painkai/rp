@@ -1,0 +1,5 @@
+anthropic
+flask
+opencv-python-headless
+python-dotenv
+requests
