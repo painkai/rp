@@ -58,7 +58,10 @@ def _load_background():
 
 
 def _frame_diff(a, b) -> int:
-    diff = cv2.absdiff(a, b)
+    # 전체 밝기 차이(자동노출 변화)를 제거하고 비교
+    a_norm = cv2.normalize(a, None, 0, 255, cv2.NORM_MINMAX)
+    b_norm = cv2.normalize(b, None, 0, 255, cv2.NORM_MINMAX)
+    diff = cv2.absdiff(a_norm, b_norm)
     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
     return cv2.countNonZero(thresh)
 
