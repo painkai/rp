@@ -135,11 +135,19 @@ def analyze_with_ollama(after_path: str) -> str:
         return f"분석 실패: {e}"
 
 
-# ── 분석기 선택 ───────────────────────────────────────────────────────────────
+# ── 분석기 선택 (Ollama 우선, 실패 시 Claude fallback) ────────────────────────
 def analyze(after_path: str) -> str:
     if ANALYZER == "claude":
         return analyze_with_claude(after_path)
-    return analyze_with_ollama(after_path)
+
+    try:
+        result = analyze_with_ollama(after_path)
+        if result and "분석 실패" not in result:
+            return result
+        raise RuntimeError("Ollama 응답 없음")
+    except Exception as e:
+        log.warning(f"Ollama 실패 → Claude fallback: {e}")
+        return analyze_with_claude(after_path)
 
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
