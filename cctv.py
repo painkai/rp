@@ -24,8 +24,10 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
-MOTION_THRESHOLD = int(os.getenv("MOTION_THRESHOLD", 3000))
-COOLDOWN        = int(os.getenv("COOLDOWN_SECONDS", 60))
+MOTION_THRESHOLD  = int(os.getenv("MOTION_THRESHOLD", 3000))
+COOLDOWN          = int(os.getenv("COOLDOWN_SECONDS", 60))
+BG_UPDATE_INTERVAL = int(os.getenv("BG_UPDATE_INTERVAL", 3600))
+BG_CHANGE_THRESHOLD = int(os.getenv("BG_CHANGE_THRESHOLD", 50000))
 ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
 OLLAMA_HOST     = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "moondream")
@@ -37,6 +39,22 @@ IMAGES_DIR.mkdir(exist_ok=True)
 # ── 공유 상태 ──────────────────────────────────────────────────────────────────
 latest_frame: cv2.typing.MatLike | None = None
 frame_lock = threading.Lock()
+
+background_gray: cv2.typing.MatLike | None = None
+background_lock = threading.Lock()
+
+
+def _load_background() -> cv2.typing.MatLike | None:
+    if not BACKGROUND_PATH.exists():
+        return None
+    img = cv2.imread(str(BACKGROUND_PATH), cv2.IMREAD_GRAYSCALE)
+    return cv2.GaussianBlur(img, (21, 21), 0)
+
+
+def _frame_diff(a: cv2.typing.MatLike, b: cv2.typing.MatLike) -> int:
+    diff = cv2.absdiff(a, b)
+    _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+    return cv2.countNonZero(thresh)
 
 
 # ── 텔레그램 ──────────────────────────────────────────────────────────────────
@@ -179,9 +197,65 @@ def cleanup_images(keep: int = 50) -> None:
         f.unlink(missing_ok=True)
 
 
+# ── 배경 자동 갱신 루프 ───────────────────────────────────────────────────────
+def background_update_loop() -> None:
+    global background_gray
+
+    # 첫 실행은 interval 후 시작
+    time.sleep(BG_UPDATE_INTERVAL)
+
+    while True:
+        with frame_lock:
+            candidate = latest_frame.copy() if latest_frame is not None else None
+
+        if candidate is None:
+            time.sleep(60)
+            continue
+
+        candidate_gray = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+        candidate_gray = cv2.GaussianBlur(candidate_gray, (21, 21), 0)
+
+        with background_lock:
+            current_bg = background_gray
+
+        if current_bg is not None and _frame_diff(current_bg, candidate_gray) > BG_CHANGE_THRESHOLD:
+            # 차이가 크면 1분 후 재촬영해서 안정적인지 확인
+            log.info("배경 변화 큼 — 1분 후 재확인")
+            time.sleep(60)
+
+            with frame_lock:
+                candidate2 = latest_frame.copy() if latest_frame is not None else None
+
+            if candidate2 is None:
+                time.sleep(BG_UPDATE_INTERVAL - 60)
+                continue
+
+            candidate2_gray = cv2.cvtColor(candidate2, cv2.COLOR_BGR2GRAY)
+            candidate2_gray = cv2.GaussianBlur(candidate2_gray, (21, 21), 0)
+
+            if _frame_diff(candidate_gray, candidate2_gray) > BG_CHANGE_THRESHOLD:
+                log.info("배경 여전히 불안정 — 갱신 건너뜀")
+                time.sleep(BG_UPDATE_INTERVAL - 60)
+                continue
+
+            # 1분 사이 안정화됨 → 두 번째 프레임으로 갱신
+            save_gray = candidate2_gray
+            save_frame = candidate2
+        else:
+            save_gray = candidate_gray
+            save_frame = candidate
+
+        cv2.imwrite(str(BACKGROUND_PATH), save_frame)
+        with background_lock:
+            background_gray = save_gray
+        log.info("배경 이미지 자동 갱신 완료")
+
+        time.sleep(BG_UPDATE_INTERVAL)
+
+
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
 def camera_loop() -> None:
-    global latest_frame
+    global latest_frame, background_gray
 
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -193,10 +267,10 @@ def camera_loop() -> None:
 
     log.info("카메라 시작")
 
-    background_gray = None
-    if BACKGROUND_PATH.exists():
-        background_gray = cv2.imread(str(BACKGROUND_PATH), cv2.IMREAD_GRAYSCALE)
-        background_gray = cv2.GaussianBlur(background_gray, (21, 21), 0)
+    with background_lock:
+        background_gray = _load_background()
+
+    if background_gray is not None:
         log.info("배경 이미지 로드 완료")
     else:
         log.warning("배경 이미지 없음 — 동작 감지 비활성. background_update.py 를 실행하세요")
@@ -213,7 +287,10 @@ def camera_loop() -> None:
         with frame_lock:
             latest_frame = frame
 
-        if background_gray is None:
+        with background_lock:
+            bg = background_gray
+
+        if bg is None:
             time.sleep(0.05)
             continue
 
@@ -225,9 +302,7 @@ def camera_loop() -> None:
         # 동작 감지
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
-        diff = cv2.absdiff(background_gray, gray)
-        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-        changed = cv2.countNonZero(thresh)
+        changed = _frame_diff(bg, gray)
 
         if changed > MOTION_THRESHOLD:
             last_event_time = now
@@ -298,6 +373,9 @@ def stream():
 if __name__ == "__main__":
     cam_thread = threading.Thread(target=camera_loop, daemon=True)
     cam_thread.start()
+
+    bg_thread = threading.Thread(target=background_update_loop, daemon=True)
+    bg_thread.start()
 
     log.info(f"웹 스트리밍 시작: http://0.0.0.0:{STREAM_PORT}")
     app.run(host="0.0.0.0", port=STREAM_PORT, threaded=True)
