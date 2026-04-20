@@ -52,6 +52,7 @@ event_time_lock = threading.Lock()
 
 consecutive_alerts = 0
 alerts_paused = False
+alerts_paused_since = 0.0
 alert_state_lock = threading.Lock()
 
 
@@ -199,7 +200,7 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
-    global last_event_cooldown, consecutive_alerts, alerts_paused
+    global last_event_cooldown, consecutive_alerts, alerts_paused, alerts_paused_since
     log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
     time.sleep(3)
 
@@ -237,6 +238,7 @@ def handle_event(ts: str) -> None:
         count = consecutive_alerts
         if count >= CAMERA_MOVE_LIMIT and not paused:
             alerts_paused = True
+            alerts_paused_since = time.time()
 
     if paused:
         log.warning("알림 일시 중단 중 — 카메라 위치 확인 필요")
@@ -266,12 +268,35 @@ def cleanup_images(keep: int = 50) -> None:
 
 # ── 배경 자동 갱신 루프 ───────────────────────────────────────────────────────
 def background_update_loop() -> None:
-    global background_gray, consecutive_alerts, alerts_paused
+    global background_gray, consecutive_alerts, alerts_paused, alerts_paused_since
 
     # 첫 실행은 interval 후 시작
     time.sleep(BG_UPDATE_INTERVAL)
 
     while True:
+        # 알림 중단 30분 경과 시 강제 갱신
+        with alert_state_lock:
+            paused = alerts_paused
+            paused_since = alerts_paused_since
+
+        if paused and time.time() - paused_since >= 1800:
+            log.info("알림 중단 30분 경과 — 배경 강제 갱신")
+            with frame_lock:
+                forced = latest_frame.copy() if latest_frame is not None else None
+            if forced is not None:
+                forced_gray = cv2.cvtColor(forced, cv2.COLOR_BGR2GRAY)
+                forced_gray = cv2.GaussianBlur(forced_gray, (21, 21), 0)
+                cv2.imwrite(str(BACKGROUND_PATH), forced)
+                with background_lock:
+                    background_gray = forced_gray
+                with alert_state_lock:
+                    consecutive_alerts = 0
+                    alerts_paused = False
+                send_telegram_text("배경 이미지가 자동 갱신되었습니다. 알림이 재개됩니다.")
+                log.info("강제 배경 갱신 완료 — 알림 재개")
+            time.sleep(BG_UPDATE_INTERVAL)
+            continue
+
         with frame_lock:
             candidate = latest_frame.copy() if latest_frame is not None else None
 
@@ -320,7 +345,14 @@ def background_update_loop() -> None:
             alerts_paused = False
         log.info("배경 이미지 자동 갱신 완료 — 알림 상태 초기화")
 
-        time.sleep(BG_UPDATE_INTERVAL)
+        # 60초 단위로 쪼개서 중간에 강제 갱신 체크 가능하게
+        for _ in range(BG_UPDATE_INTERVAL // 60):
+            time.sleep(60)
+            with alert_state_lock:
+                paused = alerts_paused
+                paused_since = alerts_paused_since
+            if paused and time.time() - paused_since >= 1800:
+                break
 
 
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
