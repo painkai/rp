@@ -37,21 +37,21 @@ BACKGROUND_PATH = IMAGES_DIR / "background.jpg"
 IMAGES_DIR.mkdir(exist_ok=True)
 
 # ── 공유 상태 ──────────────────────────────────────────────────────────────────
-latest_frame: cv2.typing.MatLike | None = None
+latest_frame = None
 frame_lock = threading.Lock()
 
-background_gray: cv2.typing.MatLike | None = None
+background_gray = None
 background_lock = threading.Lock()
 
 
-def _load_background() -> cv2.typing.MatLike | None:
+def _load_background():
     if not BACKGROUND_PATH.exists():
         return None
     img = cv2.imread(str(BACKGROUND_PATH), cv2.IMREAD_GRAYSCALE)
     return cv2.GaussianBlur(img, (21, 21), 0)
 
 
-def _frame_diff(a: cv2.typing.MatLike, b: cv2.typing.MatLike) -> int:
+def _frame_diff(a, b) -> int:
     diff = cv2.absdiff(a, b)
     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
     return cv2.countNonZero(thresh)
