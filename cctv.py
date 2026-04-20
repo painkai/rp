@@ -190,11 +190,15 @@ def handle_event(ts: str) -> None:
     with background_lock:
         bg = background_gray
 
-    if bg is not None:
+    if bg is None:
+        log.warning("배경 없음 — 확인 건너뜀, 알림 전송")
+    else:
         after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
-        if _frame_diff(bg, after_gray) <= CONFIRM_THRESHOLD:
-            log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts}), 쿨다운 {COOLDOWN_NO_ALERT}초")
+        diff = _frame_diff(bg, after_gray)
+        log.info(f"3초 후 diff: {diff} (임계값: {CONFIRM_THRESHOLD})")
+        if diff <= CONFIRM_THRESHOLD:
+            log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts})")
             with event_time_lock:
                 last_event_cooldown = COOLDOWN_NO_ALERT
             return
