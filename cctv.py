@@ -180,6 +180,16 @@ def handle_event(ts: str) -> None:
         log.warning("after 프레임 없음 — 이벤트 취소")
         return
 
+    with background_lock:
+        bg = background_gray
+
+    if bg is not None:
+        after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
+        if _frame_diff(bg, after_gray) <= MOTION_THRESHOLD:
+            log.info(f"5초 후 변화 없음 — 알림 건너뜀 ({ts})")
+            return
+
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
