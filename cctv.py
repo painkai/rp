@@ -28,6 +28,7 @@ MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
 CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
 COOLDOWN_ALERT      = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT   = int(os.getenv("COOLDOWN_NO_ALERT", 10))
+CAMERA_MOVE_LIMIT   = int(os.getenv("CAMERA_MOVE_LIMIT", 5))
 BG_UPDATE_INTERVAL = int(os.getenv("BG_UPDATE_INTERVAL", 3600))
 BG_CHANGE_THRESHOLD = int(os.getenv("BG_CHANGE_THRESHOLD", 50000))
 ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
@@ -48,6 +49,10 @@ background_lock = threading.Lock()
 last_event_time = 0.0
 last_event_cooldown = COOLDOWN_NO_ALERT
 event_time_lock = threading.Lock()
+
+consecutive_alerts = 0
+alerts_paused = False
+alert_state_lock = threading.Lock()
 
 
 def _load_background():
@@ -85,6 +90,21 @@ def send_telegram(image_path: str, analysis: str, ts: str) -> None:
         log.info("텔레그램 전송 완료")
     except Exception as e:
         log.error(f"텔레그램 전송 실패: {e}")
+
+
+def send_telegram_text(text: str) -> None:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        return
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT, "text": text},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        log.info("텔레그램 텍스트 전송 완료")
+    except Exception as e:
+        log.error(f"텔레그램 텍스트 전송 실패: {e}")
 
 
 # ── 분석 프롬프트 (공통) ──────────────────────────────────────────────────────
@@ -179,7 +199,7 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
-    global last_event_cooldown
+    global last_event_cooldown, consecutive_alerts, alerts_paused
     log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
     time.sleep(3)
 
@@ -202,6 +222,8 @@ def handle_event(ts: str) -> None:
         log.info(f"3초 후 diff: {diff} (임계값: {CONFIRM_THRESHOLD})")
         if diff <= CONFIRM_THRESHOLD:
             log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts})")
+            with alert_state_lock:
+                consecutive_alerts = 0
             with event_time_lock:
                 last_event_cooldown = COOLDOWN_NO_ALERT
             return
@@ -209,9 +231,25 @@ def handle_event(ts: str) -> None:
     with event_time_lock:
         last_event_cooldown = COOLDOWN_ALERT
 
+    with alert_state_lock:
+        consecutive_alerts += 1
+        paused = alerts_paused
+        count = consecutive_alerts
+        if count >= CAMERA_MOVE_LIMIT and not paused:
+            alerts_paused = True
+
+    if paused:
+        log.warning("알림 일시 중단 중 — 카메라 위치 확인 필요")
+        return
+
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
+
+    if count == CAMERA_MOVE_LIMIT:
+        log.warning(f"연속 알림 {count}회 — 카메라 위치 변경 의심")
+        send_telegram_text(f"⚠️ 연속 알림 {count}회 발생\n카메라 위치가 바뀐 것 같습니다.\nbackground_update.py 를 실행해주세요.")
+        return
 
     analysis = analyze(after_path)
     send_telegram(after_path, analysis, ts)
@@ -228,7 +266,7 @@ def cleanup_images(keep: int = 50) -> None:
 
 # ── 배경 자동 갱신 루프 ───────────────────────────────────────────────────────
 def background_update_loop() -> None:
-    global background_gray
+    global background_gray, consecutive_alerts, alerts_paused
 
     # 첫 실행은 interval 후 시작
     time.sleep(BG_UPDATE_INTERVAL)
@@ -277,7 +315,10 @@ def background_update_loop() -> None:
         cv2.imwrite(str(BACKGROUND_PATH), save_frame)
         with background_lock:
             background_gray = save_gray
-        log.info("배경 이미지 자동 갱신 완료")
+        with alert_state_lock:
+            consecutive_alerts = 0
+            alerts_paused = False
+        log.info("배경 이미지 자동 갱신 완료 — 알림 상태 초기화")
 
         time.sleep(BG_UPDATE_INTERVAL)
 
