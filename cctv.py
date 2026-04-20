@@ -170,8 +170,8 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
-    log.info(f"이벤트 시작: {ts} — 5초 후 캡처")
-    time.sleep(5)
+    log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
+    time.sleep(3)
 
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
