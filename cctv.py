@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from flask import Flask, Response, render_template_string
 from dotenv import load_dotenv
-from anthropic import Anthropic
 
 load_dotenv()
 
@@ -27,6 +26,9 @@ TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD = int(os.getenv("MOTION_THRESHOLD", 3000))
 COOLDOWN        = int(os.getenv("COOLDOWN_SECONDS", 60))
+ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
+OLLAMA_HOST     = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "moondream")
 
 IMAGES_DIR      = Path("images")
 BACKGROUND_PATH = IMAGES_DIR / "background.jpg"
@@ -58,54 +60,86 @@ def send_telegram(image_path: str, analysis: str, ts: str) -> None:
         log.error(f"텔레그램 전송 실패: {e}")
 
 
-# ── Claude Vision 비교 ────────────────────────────────────────────────────────
-def analyze_with_claude(after_path: str) -> str:
+# ── 분석 프롬프트 (공통) ──────────────────────────────────────────────────────
+_PROMPT = (
+    "첫 번째 이미지는 아무것도 없는 현관 배경입니다.\n"
+    "두 번째 이미지는 동작 감지 5초 후 현관 상태입니다.\n"
+    "배경과 비교해서 현재 현관 상태를 한 문장으로 알려주세요.\n"
+    "분류: 방문자 있음 / 택배 발견 / 동물 감지 / 오감지(변화 없음)"
+)
+
+
+def _encode(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.standard_b64encode(f.read()).decode()
+
+
+def _check_background() -> str | None:
     if not BACKGROUND_PATH.exists():
         return "배경 이미지 없음 — background_update.py 를 먼저 실행하세요"
+    return None
+
+
+# ── Claude Vision 분석 ────────────────────────────────────────────────────────
+def analyze_with_claude(after_path: str) -> str:
+    from anthropic import Anthropic
+
+    err = _check_background()
+    if err:
+        return err
 
     try:
-        client = Anthropic()
-
-        def encode(path: str) -> str:
-            with open(path, "rb") as f:
-                return base64.standard_b64encode(f.read()).decode()
-
-        bg_b64    = encode(str(BACKGROUND_PATH))
-        after_b64 = encode(after_path)
-
-        response = client.messages.create(
+        response = Anthropic().messages.create(
             model="claude-sonnet-4-6",
             max_tokens=150,
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": bg_b64},
-                    },
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": after_b64},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "첫 번째 이미지는 아무것도 없는 현관 배경입니다.\n"
-                            "두 번째 이미지는 동작 감지 5초 후 현관 상태입니다.\n"
-                            "배경과 비교해서 현재 현관 상태를 한 문장으로 알려주세요.\n"
-                            "분류: 방문자 있음 / 택배 발견 / 동물 감지 / 오감지(변화 없음)"
-                        ),
-                    },
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _encode(str(BACKGROUND_PATH))}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _encode(after_path)}},
+                    {"type": "text", "text": _PROMPT},
                 ],
             }],
         )
         result = response.content[0].text.strip()
         log.info(f"Claude 분석 결과: {result}")
         return result
-
     except Exception as e:
         log.error(f"Claude 분석 실패: {e}")
         return f"분석 실패: {e}"
+
+
+# ── Ollama Vision 분석 ────────────────────────────────────────────────────────
+def analyze_with_ollama(after_path: str) -> str:
+    err = _check_background()
+    if err:
+        return err
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": _PROMPT,
+                "images": [_encode(str(BACKGROUND_PATH)), _encode(after_path)],
+                "stream": False,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        result = resp.json()["response"].strip()
+        log.info(f"Ollama 분석 결과: {result}")
+        return result
+    except Exception as e:
+        log.error(f"Ollama 분석 실패: {e}")
+        return f"분석 실패: {e}"
+
+
+# ── 분석기 선택 ───────────────────────────────────────────────────────────────
+def analyze(after_path: str) -> str:
+    if ANALYZER == "claude":
+        return analyze_with_claude(after_path)
+    return analyze_with_ollama(after_path)
 
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
@@ -124,7 +158,7 @@ def handle_event(ts: str) -> None:
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
 
-    analysis = analyze_with_claude(after_path)
+    analysis = analyze(after_path)
     send_telegram(after_path, analysis, ts)
 
     # 오래된 이미지 정리 (최근 50장만 유지)

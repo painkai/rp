@@ -1,5 +1,7 @@
-anthropic
 flask
 opencv-python-headless
 python-dotenv
 requests
+
+# Claude 사용 시 추가 설치
+# pip install anthropic
