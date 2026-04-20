@@ -24,8 +24,9 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
-MOTION_THRESHOLD  = int(os.getenv("MOTION_THRESHOLD", 3000))
-COOLDOWN          = int(os.getenv("COOLDOWN_SECONDS", 60))
+MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
+COOLDOWN_ALERT      = int(os.getenv("COOLDOWN_ALERT", 30))
+COOLDOWN_NO_ALERT   = int(os.getenv("COOLDOWN_NO_ALERT", 10))
 BG_UPDATE_INTERVAL = int(os.getenv("BG_UPDATE_INTERVAL", 3600))
 BG_CHANGE_THRESHOLD = int(os.getenv("BG_CHANGE_THRESHOLD", 50000))
 ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
@@ -42,6 +43,10 @@ frame_lock = threading.Lock()
 
 background_gray = None
 background_lock = threading.Lock()
+
+last_event_time = 0.0
+last_event_cooldown = COOLDOWN_NO_ALERT
+event_time_lock = threading.Lock()
 
 
 def _load_background():
@@ -170,6 +175,7 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
+    global last_event_cooldown
     log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
     time.sleep(3)
 
@@ -187,8 +193,13 @@ def handle_event(ts: str) -> None:
         after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
         if _frame_diff(bg, after_gray) <= MOTION_THRESHOLD:
-            log.info(f"5초 후 변화 없음 — 알림 건너뜀 ({ts})")
+            log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts}), 쿨다운 {COOLDOWN_NO_ALERT}초")
+            with event_time_lock:
+                last_event_cooldown = COOLDOWN_NO_ALERT
             return
+
+    with event_time_lock:
+        last_event_cooldown = COOLDOWN_ALERT
 
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, frame)
@@ -265,7 +276,7 @@ def background_update_loop() -> None:
 
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
 def camera_loop() -> None:
-    global latest_frame, background_gray
+    global latest_frame, background_gray, last_event_time, last_event_cooldown
 
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -285,8 +296,6 @@ def camera_loop() -> None:
     else:
         log.warning("배경 이미지 없음 — 동작 감지 비활성. background_update.py 를 실행하세요")
 
-    last_event_time = 0.0
-
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -305,7 +314,11 @@ def camera_loop() -> None:
             continue
 
         now = time.time()
-        if now - last_event_time < COOLDOWN:
+        with event_time_lock:
+            elapsed = now - last_event_time
+            cooldown = last_event_cooldown
+
+        if elapsed < cooldown:
             time.sleep(0.05)
             continue
 
@@ -315,7 +328,9 @@ def camera_loop() -> None:
         changed = _frame_diff(bg, gray)
 
         if changed > MOTION_THRESHOLD:
-            last_event_time = now
+            with event_time_lock:
+                last_event_time = now
+                last_event_cooldown = COOLDOWN_NO_ALERT  # handle_event에서 확정
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             log.info(f"동작 감지! 변화 픽셀: {changed} — {ts}")
 
