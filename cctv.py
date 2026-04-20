@@ -25,6 +25,7 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
+CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
 COOLDOWN_ALERT      = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT   = int(os.getenv("COOLDOWN_NO_ALERT", 10))
 BG_UPDATE_INTERVAL = int(os.getenv("BG_UPDATE_INTERVAL", 3600))
@@ -192,7 +193,7 @@ def handle_event(ts: str) -> None:
     if bg is not None:
         after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
-        if _frame_diff(bg, after_gray) <= MOTION_THRESHOLD:
+        if _frame_diff(bg, after_gray) <= CONFIRM_THRESHOLD:
             log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts}), 쿨다운 {COOLDOWN_NO_ALERT}초")
             with event_time_lock:
                 last_event_cooldown = COOLDOWN_NO_ALERT
