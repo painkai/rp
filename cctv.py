@@ -25,6 +25,7 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
+LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율
 CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
 COOLDOWN_ALERT      = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT   = int(os.getenv("COOLDOWN_NO_ALERT", 10))
@@ -409,6 +410,11 @@ def camera_loop() -> None:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
         changed = _frame_diff(bg, gray)
+        total_pixels = frame.shape[0] * frame.shape[1]
+
+        if changed / total_pixels > LIGHTING_THRESHOLD:
+            time.sleep(0.05)
+            continue  # 전체 프레임 변화 → 조명 변화로 판단, 무시
 
         if changed > MOTION_THRESHOLD:
             with event_time_lock:
