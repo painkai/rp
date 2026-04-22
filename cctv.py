@@ -307,6 +307,7 @@ def background_update_loop() -> None:
                     consecutive_alerts = 0
                     alerts_paused = False
                 send_telegram_text("배경 이미지가 자동 갱신되었습니다. 알림이 재개됩니다.")
+                send_telegram_text("🔄 배경 이미지가 자동 갱신되었습니다. 알림이 재개됩니다.")
                 log.info("강제 배경 갱신 완료 — 알림 재개")
             time.sleep(BG_UPDATE_INTERVAL)
             continue
@@ -357,6 +358,7 @@ def background_update_loop() -> None:
         with alert_state_lock:
             consecutive_alerts = 0
             alerts_paused = False
+        send_telegram_text(f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
         log.info("배경 이미지 자동 갱신 완료 — 알림 상태 초기화")
 
         # 60초 단위로 쪼개서 중간에 강제 갱신 체크 가능하게
