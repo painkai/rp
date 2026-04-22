@@ -36,10 +36,11 @@ STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
 LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율
 CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
-COOLDOWN_ALERT      = int(os.getenv("COOLDOWN_ALERT", 30))
-COOLDOWN_NO_ALERT   = int(os.getenv("COOLDOWN_NO_ALERT", 10))
-CAMERA_MOVE_LIMIT   = int(os.getenv("CAMERA_MOVE_LIMIT", 5))
-BG_UPDATE_INTERVAL = int(os.getenv("BG_UPDATE_INTERVAL", 3600))
+COOLDOWN_ALERT          = int(os.getenv("COOLDOWN_ALERT", 30))
+COOLDOWN_NO_ALERT       = int(os.getenv("COOLDOWN_NO_ALERT", 10))
+BG_UPDATE_INTERVAL      = int(os.getenv("BG_UPDATE_INTERVAL", 7200))
+CONTINUOUS_ALERT_LIMIT  = int(os.getenv("CONTINUOUS_ALERT_LIMIT", 2))
+CONTINUOUS_BG_MINUTES   = int(os.getenv("CONTINUOUS_BG_MINUTES", 3))
 BG_CHANGE_THRESHOLD = int(os.getenv("BG_CHANGE_THRESHOLD", 50000))
 ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
 OLLAMA_HOST     = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -63,9 +64,26 @@ last_event_cooldown = COOLDOWN_NO_ALERT
 event_time_lock = threading.Lock()
 
 consecutive_alerts = 0
-alerts_paused = False
-alerts_paused_since = 0.0
+continuous_start = 0.0
 alert_state_lock = threading.Lock()
+
+
+def _force_bg_update(reason: str) -> None:
+    global background_gray, consecutive_alerts, continuous_start
+    with frame_lock:
+        frame = latest_frame.copy() if latest_frame is not None else None
+    if frame is None:
+        return
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+    cv2.imwrite(str(BACKGROUND_PATH), frame)
+    with background_lock:
+        background_gray = gray
+    with alert_state_lock:
+        consecutive_alerts = 0
+        continuous_start = 0.0
+    send_telegram_text(f"🔄 배경 갱신 완료 — {reason} ({datetime.now().strftime('%H:%M')})")
+    log.info(f"배경 강제 갱신 완료 — {reason}")
 
 
 def _load_background():
@@ -214,7 +232,7 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
-    global last_event_cooldown, consecutive_alerts, alerts_paused, alerts_paused_since
+    global last_event_cooldown, consecutive_alerts, continuous_start
     log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
     time.sleep(3)
 
@@ -228,9 +246,7 @@ def handle_event(ts: str) -> None:
     with background_lock:
         bg = background_gray
 
-    if bg is None:
-        log.warning("배경 없음 — 확인 건너뜀, 알림 전송")
-    else:
+    if bg is not None:
         after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
         diff = _frame_diff(bg, after_gray)
@@ -239,6 +255,7 @@ def handle_event(ts: str) -> None:
             log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts})")
             with alert_state_lock:
                 consecutive_alerts = 0
+                continuous_start = 0.0
             with event_time_lock:
                 last_event_cooldown = COOLDOWN_NO_ALERT
             return
@@ -246,31 +263,32 @@ def handle_event(ts: str) -> None:
     with event_time_lock:
         last_event_cooldown = COOLDOWN_ALERT
 
+    now = time.time()
     with alert_state_lock:
+        if continuous_start == 0.0:
+            continuous_start = now
         consecutive_alerts += 1
-        paused = alerts_paused
         count = consecutive_alerts
-        if count >= CAMERA_MOVE_LIMIT and not paused:
-            alerts_paused = True
-            alerts_paused_since = time.time()
+        elapsed = now - continuous_start
 
-    if paused:
-        log.warning("알림 일시 중단 중 — 카메라 위치 확인 필요")
+    # 3분 연속 감지 → 배경 강제 갱신
+    if elapsed >= CONTINUOUS_BG_MINUTES * 60:
+        log.info(f"연속 감지 {CONTINUOUS_BG_MINUTES}분 경과 — 배경 강제 갱신")
+        _force_bg_update(f"연속 감지 {CONTINUOUS_BG_MINUTES}분")
+        return
+
+    # 연속 알림 횟수 초과 시 텔레그램 건너뜀
+    if count > CONTINUOUS_ALERT_LIMIT:
+        log.info(f"연속 알림 {count}회 — 텔레그램 건너뜀 (최대 {CONTINUOUS_ALERT_LIMIT}회)")
         return
 
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
 
-    if count == CAMERA_MOVE_LIMIT:
-        log.warning(f"연속 알림 {count}회 — 카메라 위치 변경 의심")
-        send_telegram_text(f"⚠️ 연속 알림 {count}회 발생\n카메라 위치가 바뀐 것 같습니다.\nbackground_update.py 를 실행해주세요.")
-        return
-
     analysis = analyze(after_path)
     send_telegram(after_path, analysis, ts)
 
-    # 오래된 이미지 정리 (최근 50장만 유지)
     cleanup_images()
 
 
@@ -282,36 +300,13 @@ def cleanup_images(keep: int = 50) -> None:
 
 # ── 배경 자동 갱신 루프 ───────────────────────────────────────────────────────
 def background_update_loop() -> None:
-    global background_gray, consecutive_alerts, alerts_paused, alerts_paused_since
+    global background_gray, consecutive_alerts, continuous_start
 
     # 첫 실행은 interval 후 시작
-    time.sleep(BG_UPDATE_INTERVAL)
+    for _ in range(BG_UPDATE_INTERVAL // 60):
+        time.sleep(60)
 
     while True:
-        # 알림 중단 30분 경과 시 강제 갱신
-        with alert_state_lock:
-            paused = alerts_paused
-            paused_since = alerts_paused_since
-
-        if paused and time.time() - paused_since >= 1800:
-            log.info("알림 중단 30분 경과 — 배경 강제 갱신")
-            with frame_lock:
-                forced = latest_frame.copy() if latest_frame is not None else None
-            if forced is not None:
-                forced_gray = cv2.cvtColor(forced, cv2.COLOR_BGR2GRAY)
-                forced_gray = cv2.GaussianBlur(forced_gray, (21, 21), 0)
-                cv2.imwrite(str(BACKGROUND_PATH), forced)
-                with background_lock:
-                    background_gray = forced_gray
-                with alert_state_lock:
-                    consecutive_alerts = 0
-                    alerts_paused = False
-                send_telegram_text("배경 이미지가 자동 갱신되었습니다. 알림이 재개됩니다.")
-                send_telegram_text("🔄 배경 이미지가 자동 갱신되었습니다. 알림이 재개됩니다.")
-                log.info("강제 배경 갱신 완료 — 알림 재개")
-            time.sleep(BG_UPDATE_INTERVAL)
-            continue
-
         with frame_lock:
             candidate = latest_frame.copy() if latest_frame is not None else None
 
@@ -357,23 +352,17 @@ def background_update_loop() -> None:
             background_gray = save_gray
         with alert_state_lock:
             consecutive_alerts = 0
-            alerts_paused = False
+            continuous_start = 0.0
         send_telegram_text(f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
-        log.info("배경 이미지 자동 갱신 완료 — 알림 상태 초기화")
+        log.info("배경 이미지 자동 갱신 완료")
 
-        # 60초 단위로 쪼개서 중간에 강제 갱신 체크 가능하게
         for _ in range(BG_UPDATE_INTERVAL // 60):
             time.sleep(60)
-            with alert_state_lock:
-                paused = alerts_paused
-                paused_since = alerts_paused_since
-            if paused and time.time() - paused_since >= 1800:
-                break
 
 
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
 def camera_loop() -> None:
-    global latest_frame, background_gray, last_event_time, last_event_cooldown
+    global latest_frame, background_gray, last_event_time, last_event_cooldown, consecutive_alerts, continuous_start
 
     cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
