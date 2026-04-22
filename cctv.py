@@ -114,7 +114,7 @@ def send_telegram(image_path: str, analysis: str, ts: str) -> None:
         log.warning("텔레그램 설정 없음 — 전송 건너뜀")
         return
 
-    caption = f"[동작 감지] {ts}\n\n{analysis}"
+    caption = f"[동작 감지] {ts}" + (f"\n\n{analysis}" if analysis else "")
     try:
         with open(image_path, "rb") as photo:
             resp = requests.post(
@@ -393,8 +393,9 @@ def handle_event(ts: str) -> None:
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
 
-    analysis = analyze(after_path)
-    send_telegram(after_path, analysis, ts)
+    # analysis = analyze(after_path)
+    # send_telegram(after_path, analysis, ts)
+    send_telegram(after_path, "", ts)
 
     cleanup_images()
 
