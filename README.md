@@ -125,7 +125,8 @@ sudo systemctl start cctv
 | `STREAM_USER` | — | 스트림 접근 아이디 |
 | `STREAM_PASS` | — | 스트림 접근 비밀번호 |
 | `MOTION_THRESHOLD` | `3000` | 동작 감지 임계값 (픽셀) |
-| `CONFIRM_THRESHOLD` | `1000` | 3초 후 재확인 임계값 (픽셀) |
+| `CAPTURE_DELAY` | `2` | 감지 후 캡처까지 대기 시간 (초) |
+| `CONFIRM_THRESHOLD` | `1000` | 캡처 후 재확인 임계값 (픽셀) |
 | `LIGHTING_THRESHOLD` | `0.6` | 조명 변화 판단 비율 (0.0~1.0) |
 | `COOLDOWN_ALERT` | `30` | 알림 발송 후 재감지 대기 (초) |
 | `COOLDOWN_NO_ALERT` | `10` | 알림 미발송 후 재감지 대기 (초) |

@@ -36,6 +36,7 @@ STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
 LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율
 CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
+CAPTURE_DELAY           = int(os.getenv("CAPTURE_DELAY", 2))
 COOLDOWN_ALERT          = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT       = int(os.getenv("COOLDOWN_NO_ALERT", 10))
 BG_UPDATE_INTERVAL      = int(os.getenv("BG_UPDATE_INTERVAL", 7200))
@@ -308,8 +309,8 @@ def analyze(after_path: str) -> str:
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
     global last_event_cooldown, consecutive_alerts, continuous_start
-    log.info(f"이벤트 시작: {ts} — 3초 후 캡처")
-    time.sleep(3)
+    log.info(f"이벤트 시작: {ts} — {CAPTURE_DELAY}초 후 캡처")
+    time.sleep(CAPTURE_DELAY)
 
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
