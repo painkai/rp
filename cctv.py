@@ -6,6 +6,7 @@ import base64
 import threading
 import requests
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, Response, render_template_string, request
@@ -13,10 +14,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+
+_file_handler = TimedRotatingFileHandler(
+    LOG_DIR / "cctv.log", when="midnight", backupCount=7, encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler(), _file_handler]
 )
 log = logging.getLogger(__name__)
 

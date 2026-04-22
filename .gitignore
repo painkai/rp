@@ -4,5 +4,6 @@
 __pycache__/
 *.pyc
 images/
+logs/
 *.jpg
 *.mp4
