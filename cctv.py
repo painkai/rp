@@ -68,9 +68,11 @@ consecutive_alerts = 0
 continuous_start = 0.0
 alert_state_lock = threading.Lock()
 
+next_bg_update_time = 0.0
+
 
 def _force_bg_update(reason: str) -> None:
-    global background_gray, consecutive_alerts, continuous_start
+    global background_gray, consecutive_alerts, continuous_start, next_bg_update_time
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
     if frame is None:
@@ -83,6 +85,7 @@ def _force_bg_update(reason: str) -> None:
     with alert_state_lock:
         consecutive_alerts = 0
         continuous_start = 0.0
+    next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
     send_telegram_text(f"🔄 배경 갱신 완료 — {reason} ({datetime.now().strftime('%H:%M')})")
     log.info(f"배경 강제 갱신 완료 — {reason}")
 
@@ -160,6 +163,7 @@ _COMMANDS = {
     "지금 화면 보여줘": "현재 화면",
     "배경": "현재 배경",
     "지금 배경 보여줘": "현재 배경",
+    "언제": "배경 갱신 시간",
 }
 
 def telegram_bot_loop() -> None:
@@ -204,6 +208,18 @@ def telegram_bot_loop() -> None:
                     _send_photo_bytes(frame, f"[{label}] {datetime.now().strftime('%H:%M:%S')}")
                 else:
                     send_telegram_text("카메라 프레임을 가져올 수 없습니다.")
+
+            elif "갱신 시간" in label:
+                if next_bg_update_time > 0:
+                    remaining = int(next_bg_update_time - time.time())
+                    next_str = datetime.fromtimestamp(next_bg_update_time).strftime("%H:%M")
+                    if remaining > 0:
+                        m, s = divmod(remaining, 60)
+                        send_telegram_text(f"🕐 다음 배경 갱신: {next_str} (약 {m}분 후)")
+                    else:
+                        send_telegram_text("🔄 배경 갱신 중...")
+                else:
+                    send_telegram_text("배경 갱신 시간이 아직 설정되지 않았습니다.")
 
             elif "배경" in label:
                 if BACKGROUND_PATH.exists():
@@ -377,9 +393,10 @@ def cleanup_images(keep: int = 50) -> None:
 
 # ── 배경 자동 갱신 루프 ───────────────────────────────────────────────────────
 def background_update_loop() -> None:
-    global background_gray, consecutive_alerts, continuous_start
+    global background_gray, consecutive_alerts, continuous_start, next_bg_update_time
 
     # 첫 실행은 interval 후 시작
+    next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
     for _ in range(BG_UPDATE_INTERVAL // 60):
         time.sleep(60)
 
@@ -430,6 +447,7 @@ def background_update_loop() -> None:
         with alert_state_lock:
             consecutive_alerts = 0
             continuous_start = 0.0
+        next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
         send_telegram_text(f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
         log.info("배경 이미지 자동 갱신 완료")
 
