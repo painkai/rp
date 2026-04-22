@@ -164,6 +164,7 @@ _COMMANDS = {
     "배경": "현재 배경",
     "지금 배경 보여줘": "현재 배경",
     "언제": "배경 갱신 시간",
+    "갱신": "배경 즉시 갱신",
 }
 
 def telegram_bot_loop() -> None:
@@ -208,6 +209,10 @@ def telegram_bot_loop() -> None:
                     _send_photo_bytes(frame, f"[{label}] {datetime.now().strftime('%H:%M:%S')}")
                 else:
                     send_telegram_text("카메라 프레임을 가져올 수 없습니다.")
+
+            elif "즉시 갱신" in label:
+                send_telegram_text("🔄 배경 갱신 중...")
+                threading.Thread(target=_force_bg_update, args=("수동 갱신",), daemon=True).start()
 
             elif "갱신 시간" in label:
                 if next_bg_update_time > 0:
