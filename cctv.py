@@ -66,13 +66,14 @@ event_time_lock = threading.Lock()
 
 consecutive_alerts = 0
 continuous_start = 0.0
+last_confirmed_time = 0.0
 alert_state_lock = threading.Lock()
 
 next_bg_update_time = 0.0
 
 
 def _force_bg_update(reason: str) -> None:
-    global background_gray, consecutive_alerts, continuous_start, next_bg_update_time
+    global background_gray, consecutive_alerts, continuous_start, last_confirmed_time, next_bg_update_time
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
     if frame is None:
@@ -85,6 +86,7 @@ def _force_bg_update(reason: str) -> None:
     with alert_state_lock:
         consecutive_alerts = 0
         continuous_start = 0.0
+        last_confirmed_time = 0.0
     next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
     send_telegram_text(f"🔄 배경 갱신 완료 — {reason} ({datetime.now().strftime('%H:%M')})")
     log.info(f"배경 강제 갱신 완료 — {reason}")
@@ -330,7 +332,7 @@ def analyze(after_path: str) -> str:
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
 def handle_event(ts: str) -> None:
-    global last_event_cooldown, consecutive_alerts, continuous_start
+    global last_event_cooldown, consecutive_alerts, continuous_start, last_confirmed_time
     log.info(f"이벤트 시작: {ts} — {CAPTURE_DELAY}초 후 캡처")
     time.sleep(CAPTURE_DELAY)
 
@@ -354,6 +356,7 @@ def handle_event(ts: str) -> None:
             with alert_state_lock:
                 consecutive_alerts = 0
                 continuous_start = 0.0
+                last_confirmed_time = 0.0
             with event_time_lock:
                 last_event_cooldown = COOLDOWN_NO_ALERT
             return
@@ -363,8 +366,14 @@ def handle_event(ts: str) -> None:
 
     now = time.time()
     with alert_state_lock:
+        # 마지막 감지로부터 쿨다운의 3배 이상 지났으면 연속이 끊긴 것으로 판단
+        gap = now - last_confirmed_time if last_confirmed_time > 0 else 0
+        if gap > COOLDOWN_ALERT * 3:
+            continuous_start = now
+            consecutive_alerts = 0
         if continuous_start == 0.0:
             continuous_start = now
+        last_confirmed_time = now
         consecutive_alerts += 1
         count = consecutive_alerts
         elapsed = now - continuous_start
