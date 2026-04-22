@@ -88,7 +88,7 @@ def _force_bg_update(reason: str) -> None:
         continuous_start = 0.0
         last_confirmed_time = 0.0
     next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
-    send_telegram_text(f"🔄 배경 갱신 완료 — {reason} ({datetime.now().strftime('%H:%M')})")
+    _send_photo_bytes(frame, f"🔄 배경 갱신 완료 — {reason} ({datetime.now().strftime('%H:%M')})")
     log.info(f"배경 강제 갱신 완료 — {reason}")
 
 
@@ -462,7 +462,7 @@ def background_update_loop() -> None:
             consecutive_alerts = 0
             continuous_start = 0.0
         next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
-        send_telegram_text(f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
+        _send_photo_bytes(save_frame, f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
         log.info("배경 이미지 자동 갱신 완료")
 
         for _ in range(BG_UPDATE_INTERVAL // 60):
