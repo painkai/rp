@@ -331,8 +331,9 @@ def analyze(after_path: str) -> str:
 
 
 # ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
-def handle_event(ts: str) -> None:
+def handle_event(ts: str, detect_pixels: int, total_pixels: int) -> None:
     global last_event_cooldown, consecutive_alerts, continuous_start, last_confirmed_time
+    detect_pct = detect_pixels / total_pixels * 100
     log.info(f"이벤트 시작: {ts} — {CAPTURE_DELAY}초 후 캡처")
     time.sleep(CAPTURE_DELAY)
 
@@ -393,9 +394,19 @@ def handle_event(ts: str) -> None:
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
 
+    after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
+    with background_lock:
+        bg2 = background_gray
+    after_diff = _frame_diff(bg2, after_gray) if bg2 is not None else 0
+    after_pct = after_diff / total_pixels * 100
+
     # analysis = analyze(after_path)
-    # send_telegram(after_path, analysis, ts)
-    send_telegram(after_path, "", ts)
+    caption = (
+        f"감지: {detect_pixels:,}px ({detect_pct:.1f}%)\n"
+        f"캡처: {after_diff:,}px ({after_pct:.1f}%)"
+    )
+    send_telegram(after_path, caption, ts)
 
     cleanup_images()
 
@@ -533,9 +544,11 @@ def camera_loop() -> None:
                 last_event_time = now
                 last_event_cooldown = COOLDOWN_NO_ALERT  # handle_event에서 확정
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log.info(f"동작 감지! 변화 픽셀: {changed} — {ts}")
+            pct = changed / total_pixels * 100
+            log.info(f"동작 감지! 변화 픽셀: {changed} ({pct:.1f}%) — {ts}")
+            send_telegram_text(f"🔍 동작 감지\n{changed:,}px ({pct:.1f}%)")
 
-            threading.Thread(target=handle_event, args=(ts,), daemon=True).start()
+            threading.Thread(target=handle_event, args=(ts, changed, total_pixels), daemon=True).start()
 
         time.sleep(0.05)
 
