@@ -113,10 +113,12 @@ def send_telegram_text(text: str) -> None:
 
 # ── 분석 프롬프트 (공통) ──────────────────────────────────────────────────────
 _PROMPT = (
-    "첫 번째 이미지는 아무것도 없는 현관 배경입니다.\n"
-    "두 번째 이미지는 동작 감지 3초 후 현관 상태입니다.\n"
-    "배경과 비교해서 현재 현관 상태를 한 문장으로 알려주세요.\n"
-    "분류: 방문자 있음 / 택배 발견 / 동물 감지 / 오감지(변화 없음)"
+    "Image 1 is the empty background of a front door entrance.\n"
+    "Image 2 was captured after motion was detected.\n"
+    "Compare the two images and identify what is new or different in Image 2.\n"
+    "Reply in Korean using ONLY one of these labels, then add a brief detail in parentheses:\n"
+    "사람 인식 / 택배 인식 / 동물 인식 / 차량 인식 / 비닐봉지 인식 / 기타 물체 인식 / 오감지\n"
+    "Example: 택배 인식 (현관 앞 중간 크기 박스)"
 )
 
 
