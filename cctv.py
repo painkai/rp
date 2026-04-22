@@ -174,6 +174,8 @@ def telegram_bot_loop() -> None:
         return
 
     offset = 0
+    retry_delay = 5
+    fail_count = 0
     log.info("텔레그램 봇 커맨드 수신 시작")
 
     while True:
@@ -184,9 +186,18 @@ def telegram_bot_loop() -> None:
                 timeout=35,
             )
             updates = resp.json().get("result", [])
+            retry_delay = 5
+            fail_count = 0
         except Exception as e:
-            log.error(f"텔레그램 getUpdates 실패: {e}")
-            time.sleep(5)
+            fail_count += 1
+            # 토큰 노출 방지: URL에서 토큰 제거 후 로깅
+            msg = str(e).replace(TELEGRAM_TOKEN, "***")
+            if fail_count == 1:
+                log.error(f"텔레그램 연결 실패: {msg}")
+            elif fail_count % 10 == 0:
+                log.warning(f"텔레그램 연결 실패 {fail_count}회째 — {retry_delay}초 후 재시도")
+            retry_delay = min(retry_delay * 2, 300)  # 최대 5분
+            time.sleep(retry_delay)
             continue
 
         for update in updates:
