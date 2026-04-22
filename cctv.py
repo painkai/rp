@@ -138,6 +138,81 @@ def send_telegram_text(text: str) -> None:
         log.error(f"텔레그램 텍스트 전송 실패: {e}")
 
 
+def _send_photo_bytes(img, caption: str = "") -> None:
+    ret, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ret:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data={"chat_id": TELEGRAM_CHAT, "caption": caption},
+            files={"photo": ("frame.jpg", buf.tobytes(), "image/jpeg")},
+            timeout=15,
+        ).raise_for_status()
+    except Exception as e:
+        log.error(f"텔레그램 사진 전송 실패: {e}")
+
+
+# ── 텔레그램 봇 커맨드 수신 ───────────────────────────────────────────────────
+_COMMANDS = {
+    "화면": "현재 화면",
+    "지금 화면 보여줘": "현재 화면",
+    "배경": "현재 배경",
+    "지금 배경 보여줘": "현재 배경",
+}
+
+def telegram_bot_loop() -> None:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        return
+
+    offset = 0
+    log.info("텔레그램 봇 커맨드 수신 시작")
+
+    while True:
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                params={"offset": offset, "timeout": 30},
+                timeout=35,
+            )
+            updates = resp.json().get("result", [])
+        except Exception as e:
+            log.error(f"텔레그램 getUpdates 실패: {e}")
+            time.sleep(5)
+            continue
+
+        for update in updates:
+            offset = update["update_id"] + 1
+            msg = update.get("message", {})
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+            text = msg.get("text", "").strip()
+
+            if chat_id != TELEGRAM_CHAT or not text:
+                continue
+
+            label = _COMMANDS.get(text)
+            if label is None:
+                continue
+
+            log.info(f"봇 커맨드 수신: {text}")
+
+            if "화면" in label:
+                with frame_lock:
+                    frame = latest_frame.copy() if latest_frame is not None else None
+                if frame is not None:
+                    _send_photo_bytes(frame, f"[{label}] {datetime.now().strftime('%H:%M:%S')}")
+                else:
+                    send_telegram_text("카메라 프레임을 가져올 수 없습니다.")
+
+            elif "배경" in label:
+                if BACKGROUND_PATH.exists():
+                    bg = cv2.imread(str(BACKGROUND_PATH))
+                    if bg is not None:
+                        _send_photo_bytes(bg, f"[{label}] {datetime.now().strftime('%H:%M:%S')}")
+                else:
+                    send_telegram_text("배경 이미지가 없습니다.")
+
+
 # ── 분석 프롬프트 (공통) ──────────────────────────────────────────────────────
 _PROMPT = (
     "Image 1 is the empty background of a front door entrance.\n"
@@ -516,6 +591,9 @@ if __name__ == "__main__":
 
     bg_thread = threading.Thread(target=background_update_loop, daemon=True)
     bg_thread.start()
+
+    bot_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
+    bot_thread.start()
 
     log.info(f"웹 스트리밍 시작: http://0.0.0.0:{STREAM_PORT}")
     app.run(host="0.0.0.0", port=STREAM_PORT, threaded=True)
