@@ -9,7 +9,7 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, Response, render_template_string, request
+from flask import Flask, Response, render_template_string, request, redirect, url_for
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -437,6 +437,10 @@ app = Flask(__name__)
 def _check_auth():
     if not STREAM_USER or not STREAM_PASS:
         return True
+    # URL 토큰 인증 (?token=비밀번호)
+    if request.args.get("token") == STREAM_PASS:
+        return True
+    # Basic 인증
     auth = request.authorization
     return auth and auth.username == STREAM_USER and auth.password == STREAM_PASS
 
@@ -463,7 +467,7 @@ INDEX_HTML = """
 </head>
 <body>
   <h1>현관 CCTV — 실시간</h1>
-  <img src="/stream" alt="live">
+  <img src="/stream{{ token_param }}" alt="live">
 </body>
 </html>
 """
@@ -493,7 +497,9 @@ def mjpeg_generator():
 def index():
     if not _check_auth():
         return _require_auth()
-    return render_template_string(INDEX_HTML)
+    token = request.args.get("token", "")
+    token_param = f"?token={token}" if token else ""
+    return render_template_string(INDEX_HTML, token_param=token_param)
 
 
 @app.route("/stream")
