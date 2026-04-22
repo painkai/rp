@@ -8,7 +8,7 @@ import requests
 import logging
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, request
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,6 +34,8 @@ BG_CHANGE_THRESHOLD = int(os.getenv("BG_CHANGE_THRESHOLD", 50000))
 ANALYZER        = os.getenv("ANALYZER", "ollama")   # "ollama" | "claude"
 OLLAMA_HOST     = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "moondream")
+STREAM_USER     = os.getenv("STREAM_USER", "")
+STREAM_PASS     = os.getenv("STREAM_PASS", "")
 
 IMAGES_DIR      = Path("images")
 BACKGROUND_PATH = IMAGES_DIR / "background.jpg"
@@ -423,6 +425,20 @@ def camera_loop() -> None:
 # ── Flask 웹 스트리밍 ──────────────────────────────────────────────────────────
 app = Flask(__name__)
 
+
+def _check_auth():
+    if not STREAM_USER or not STREAM_PASS:
+        return True
+    auth = request.authorization
+    return auth and auth.username == STREAM_USER and auth.password == STREAM_PASS
+
+
+def _require_auth():
+    return Response(
+        "인증이 필요합니다.", 401,
+        {"WWW-Authenticate": 'Basic realm="CCTV"'}
+    )
+
 INDEX_HTML = """
 <!DOCTYPE html>
 <html>
@@ -467,11 +483,15 @@ def mjpeg_generator():
 
 @app.route("/")
 def index():
+    if not _check_auth():
+        return _require_auth()
     return render_template_string(INDEX_HTML)
 
 
 @app.route("/stream")
 def stream():
+    if not _check_auth():
+        return _require_auth()
     return Response(mjpeg_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
