@@ -35,7 +35,8 @@ PC_RECEIVER_URL  = os.getenv("PC_RECEIVER", "")
 
 MOTION_THRESHOLD   = int(os.getenv("MOTION_THRESHOLD", 3000))
 LIGHTING_THRESHOLD = float(os.getenv("LIGHTING_THRESHOLD", 0.6))
-CONFIRM_THRESHOLD  = int(os.getenv("CONFIRM_THRESHOLD", 1000))
+CONFIRM_THRESHOLD        = int(os.getenv("CONFIRM_THRESHOLD", 1000))
+DETECT_DIFF_THRESHOLD    = int(os.getenv("DETECT_DIFF_THRESHOLD", 0))
 CAPTURE_DELAY      = int(os.getenv("CAPTURE_DELAY", 2))
 COOLDOWN_ALERT     = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT  = int(os.getenv("COOLDOWN_NO_ALERT", 10))
@@ -221,6 +222,12 @@ def handle_event(ts: str, detect_frame, total_px: int) -> None:
     after_gray = cv2.cvtColor(after_frame, cv2.COLOR_BGR2GRAY)
     d_detect = _frame_diff(detect_gray, after_gray)   # 감지 시 vs 2초 후
     d_after  = _frame_diff(bg, after_gray)             # 2초 후 vs 배경
+
+    if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
+        log.info(f"감지→캡처 변화 없음 ({d_detect}px) — 건너뜀")
+        with event_time_lock:
+            last_event_cooldown = COOLDOWN_NO_ALERT
+        return
 
     if d_after <= CONFIRM_THRESHOLD:
         log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
