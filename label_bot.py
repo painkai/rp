@@ -119,6 +119,13 @@ def _send_to_pc(src: Path, label: str, ts: str) -> bool:
         return False
 
 
+# ── 이미지 정리 ───────────────────────────────────────────────────────────────
+def _cleanup_images(keep: int = 50) -> None:
+    files = sorted(IMAGES_DIR.glob("after_*.jpg"), key=lambda f: f.stat().st_mtime)
+    for f in files[:-keep]:
+        f.unlink(missing_ok=True)
+
+
 # ── 이벤트 처리 ───────────────────────────────────────────────────────────────
 def handle_event(ts: str) -> None:
     log.info(f"이벤트: {ts} — {CAPTURE_DELAY}초 후 캡처")
@@ -147,6 +154,7 @@ def handle_event(ts: str) -> None:
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, frame)
     log.info(f"저장: {after_path}")
+    _cleanup_images()
 
     msg_id = _send_photo(after_path, ts)
     if msg_id is not None:
