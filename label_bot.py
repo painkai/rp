@@ -113,6 +113,29 @@ def _send_reply(chat_id: str, reply_to_id: int, text: str) -> None:
 
 
 # ── PC 전송 ───────────────────────────────────────────────────────────────────
+def _download_from_telegram(photo_sizes: list, dest: Path) -> bool:
+    file_id = photo_sizes[-1]["file_id"]
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        file_path = r.json()["result"]["file_path"]
+        img = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+            timeout=30,
+        )
+        img.raise_for_status()
+        dest.write_bytes(img.content)
+        log.info(f"텔레그램에서 다운로드: {dest.name}")
+        return True
+    except Exception as e:
+        log.error(f"텔레그램 다운로드 실패: {e}")
+        return False
+
+
 def _send_to_pc(src: Path, label: str, ts: str) -> bool:
     try:
         with src.open("rb") as f:
@@ -352,14 +375,26 @@ def _process_update(update: dict) -> None:
                     f"알 수 없는 라벨입니다.\n사용 가능: {', '.join(sorted(VALID_LABELS))}")
         return
 
+    tmp = None
     if not src.exists():
-        _send_reply(chat_id, msg_id, f"이미지를 찾을 수 없습니다: {src.name}")
-        return
+        photo_sizes = reply_to.get("photo")
+        if not photo_sizes:
+            _send_reply(chat_id, msg_id, f"이미지를 찾을 수 없습니다: {src.name}")
+            return
+        tmp = IMAGES_DIR / f"tmp_{ts}.jpg"
+        if not _download_from_telegram(photo_sizes, tmp):
+            _send_reply(chat_id, msg_id, "텔레그램에서 이미지를 가져오지 못했습니다.")
+            return
+        src = tmp
 
     if _send_to_pc(src, text, ts):
         src.unlink(missing_ok=True)
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
         _send_reply(chat_id, msg_id, f"✅ 라벨 저장: {text}")
     else:
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
         _send_reply(chat_id, msg_id, "PC 전송 실패 — 로그를 확인하세요.")
 
 
