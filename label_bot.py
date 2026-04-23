@@ -187,6 +187,10 @@ def _update_background(reason: str) -> None:
 
 
 def background_update_loop() -> None:
+    while latest_frame is None:
+        time.sleep(0.5)
+    _update_background("시작 시 갱신")
+
     while True:
         now = datetime.now()
         seconds_until_next_hour = (60 - now.minute) * 60 - now.second
