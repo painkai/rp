@@ -45,6 +45,7 @@ BACKGROUND_PATH = IMAGES_DIR / "background.jpg"
 OFFSET_FILE     = Path("dataset") / ".offset"
 
 VALID_LABELS = {"사람", "택배", "비닐봉지", "기타", "오감지", "조명변화"}
+_LABEL_MAP = {"1": "사람", "2": "택배", "3": "조명변화", "4": "오감지", "5": "비닐봉지", "6": "기타"}
 _TS_RE = re.compile(r"\[동작 감지\] (\d{8}_\d{6})")
 
 # ── 공유 상태 ──────────────────────────────────────────────────────────────────
@@ -73,8 +74,13 @@ def _frame_diff(a, b) -> int:
 
 
 # ── 텔레그램 ──────────────────────────────────────────────────────────────────
-def _send_photo(image_path: str, ts: str):
-    caption = f"[동작 감지] {ts}"
+def _send_photo(image_path: str, ts: str, detect_px: int, detect_pct: float, after_px: int, after_pct: float):
+    caption = (
+        f"[동작 감지] {ts}\n"
+        f"감지: {detect_px:,}px ({detect_pct:.1f}%)\n"
+        f"캡처: {after_px:,}px ({after_pct:.1f}%)\n\n"
+        f"1사람 2택배 3조명변화 4오감지 5비닐봉지 6기타"
+    )
     try:
         with open(image_path, "rb") as photo:
             resp = requests.post(
@@ -196,7 +202,7 @@ def _cleanup_images(keep: int = 50) -> None:
 
 
 # ── 이벤트 처리 ───────────────────────────────────────────────────────────────
-def handle_event(ts: str) -> None:
+def handle_event(ts: str, detect_px: int, total_px: int) -> None:
     log.info(f"이벤트: {ts} — {CAPTURE_DELAY}초 후 캡처")
     time.sleep(CAPTURE_DELAY)
 
@@ -211,10 +217,10 @@ def handle_event(ts: str) -> None:
         return
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    diff = _frame_diff(bg, gray)
+    after_px = _frame_diff(bg, gray)
 
-    if diff <= CONFIRM_THRESHOLD:
-        log.info(f"재확인 변화 없음 ({diff}px) — 건너뜀")
+    if after_px <= CONFIRM_THRESHOLD:
+        log.info(f"재확인 변화 없음 ({after_px}px) — 건너뜀")
         with event_time_lock:
             global last_event_cooldown
             last_event_cooldown = COOLDOWN_NO_ALERT
@@ -225,7 +231,9 @@ def handle_event(ts: str) -> None:
     log.info(f"저장: {after_path}")
     _cleanup_images()
 
-    msg_id = _send_photo(after_path, ts)
+    detect_pct = detect_px / total_px * 100
+    after_pct = after_px / total_px * 100
+    msg_id = _send_photo(after_path, ts, detect_px, detect_pct, after_px, after_pct)
     if msg_id is not None:
         with _sent_photo_lock:
             _sent_photo_map[msg_id] = after_path
@@ -301,7 +309,7 @@ def camera_loop() -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pct = changed / total * 100
         log.info(f"동작 감지: {changed:,}px ({pct:.1f}%) — {ts}")
-        threading.Thread(target=handle_event, args=(ts,), daemon=True).start()
+        threading.Thread(target=handle_event, args=(ts, changed, total), daemon=True).start()
 
         time.sleep(0.05)
 
@@ -370,6 +378,7 @@ def _process_update(update: dict) -> None:
     src = Path(src_path)
     ts = src.stem.replace("after_", "")
 
+    text = _LABEL_MAP.get(text, text)
     if text not in VALID_LABELS:
         _send_reply(chat_id, msg_id,
                     f"알 수 없는 라벨입니다.\n사용 가능: {', '.join(sorted(VALID_LABELS))}")
