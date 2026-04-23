@@ -308,6 +308,7 @@ def _process_update(update: dict) -> None:
         return
 
     if _send_to_pc(src, text, ts):
+        src.unlink(missing_ok=True)
         _send_reply(chat_id, msg_id, f"✅ 라벨 저장: {text}")
     else:
         _send_reply(chat_id, msg_id, "PC 전송 실패 — 로그를 확인하세요.")
