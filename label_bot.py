@@ -2,13 +2,12 @@
 """
 텔레그램 reply 기반 동작 감지 이미지 라벨링 봇.
 
-사용법:
+사용법 (라즈베리파이에서 실행):
   python label_bot.py
 
 동작:
   cctv.py 가 전송한 동작 감지 사진에 텔레그램으로 reply 하면
-  이미지를 텔레그램에서 직접 다운로드해 dataset/ 에 저장합니다.
-  PC 에서 실행하면 라즈베리파이 파일시스템 접근 없이 동작합니다.
+  로컬 이미지(images/)를 PC 의 receiver.py 로 전송합니다.
 
 주의:
   cctv.py 와 같은 봇 토큰을 사용하므로, 동시에 실행하면
@@ -34,12 +33,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
+PC_RECEIVER_URL  = os.getenv("PC_RECEIVER", "")  # http://192.168.x.x:8765
 
-DATASET_DIR = Path("dataset")
-LABELS_FILE = DATASET_DIR / "labels.jsonl"
-OFFSET_FILE = DATASET_DIR / ".offset"
+IMAGES_DIR  = Path("images")
+OFFSET_FILE = Path("dataset") / ".offset"
 
 VALID_LABELS = {"사람", "택배", "동물", "차량", "비닐봉지", "기타", "오감지"}
 _TS_RE = re.compile(r"\[동작 감지\] (\d{8}_\d{6})")
@@ -86,43 +85,24 @@ def _send_reply(chat_id: str, reply_to_id: int, text: str) -> None:
         log.error(f"sendMessage 실패: {e}")
 
 
-def _download_photo(photo_sizes: list, dest: Path) -> bool:
-    file_id = photo_sizes[-1]["file_id"]
+def _send_to_pc(src: Path, label: str, ts: str) -> bool:
+    if not PC_RECEIVER_URL:
+        log.error("PC_RECEIVER 가 설정되지 않았습니다")
+        return False
     try:
-        r = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
-            params={"file_id": file_id},
-            timeout=10,
-        )
-        r.raise_for_status()
-        file_path = r.json()["result"]["file_path"]
-        img = requests.get(
-            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
-            timeout=30,
-        )
-        img.raise_for_status()
-        dest.write_bytes(img.content)
+        with src.open("rb") as f:
+            resp = requests.post(
+                f"{PC_RECEIVER_URL}/upload",
+                data={"label": label, "timestamp": ts},
+                files={"photo": (src.name, f, "image/jpeg")},
+                timeout=30,
+            )
+        resp.raise_for_status()
+        log.info(f"PC 전송 완료: {src.name} ({label})")
         return True
     except Exception as e:
-        log.error(f"사진 다운로드 실패: {e}")
+        log.error(f"PC 전송 실패: {e}")
         return False
-
-
-def _save_label(photo_sizes: list, label: str, ts: str) -> bool:
-    dest_name = f"{ts}_{label}.jpg"
-    dest = DATASET_DIR / dest_name
-    if not _download_photo(photo_sizes, dest):
-        return False
-    entry = {
-        "file": dest_name,
-        "label": label,
-        "timestamp": ts,
-        "saved_at": datetime.now().isoformat(),
-    }
-    with LABELS_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    log.info(f"라벨 저장: {dest_name} ({label})")
-    return True
 
 
 def _process(update: dict) -> None:
@@ -150,28 +130,31 @@ def _process(update: dict) -> None:
     ts = m.group(1)
     msg_id = msg["message_id"]
 
-    photo_sizes = reply_to.get("photo")
-    if not photo_sizes:
-        _send_reply(chat_id, msg_id, "원본 메시지에서 사진을 찾을 수 없습니다.")
-        return
-
     if text not in VALID_LABELS:
         _send_reply(chat_id, msg_id,
                     f"알 수 없는 라벨입니다.\n사용 가능: {', '.join(sorted(VALID_LABELS))}")
         return
 
-    if _save_label(photo_sizes, text, ts):
+    src = IMAGES_DIR / f"after_{ts}.jpg"
+    if not src.exists():
+        _send_reply(chat_id, msg_id, f"이미지를 찾을 수 없습니다: after_{ts}.jpg")
+        return
+
+    if _send_to_pc(src, text, ts):
         _send_reply(chat_id, msg_id, f"✅ 라벨 저장: {text}")
     else:
-        _send_reply(chat_id, msg_id, "저장 실패 — 로그를 확인하세요.")
+        _send_reply(chat_id, msg_id, "PC 전송 실패 — 로그를 확인하세요.")
 
 
 def main() -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         log.error("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 가 설정되지 않았습니다")
         sys.exit(1)
+    if not PC_RECEIVER_URL:
+        log.error("PC_RECEIVER 가 설정되지 않았습니다 (예: http://192.168.0.10:8765)")
+        sys.exit(1)
 
-    DATASET_DIR.mkdir(exist_ok=True)
+    OFFSET_FILE.parent.mkdir(exist_ok=True)
 
     offset = _load_offset()
     log.info(f"라벨 봇 시작 (offset={offset})")
