@@ -40,7 +40,7 @@ PC_RECEIVER_URL  = os.getenv("PC_RECEIVER", "")  # http://192.168.x.x:8765
 IMAGES_DIR  = Path("images")
 OFFSET_FILE = Path("dataset") / ".offset"
 
-VALID_LABELS = {"사람", "택배", "동물", "차량", "비닐봉지", "기타", "오감지"}
+VALID_LABELS = {"사람", "택배", "동물", "차량", "비닐봉지", "기타", "오감지", "조명변화"}
 _TS_RE = re.compile(r"\[동작 감지\] (\d{8}_\d{6})")
 
 
