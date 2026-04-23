@@ -90,6 +90,17 @@ def _send_photo(image_path: str, ts: str):
         return None
 
 
+def _send_text(text: str) -> None:
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        log.error(f"텔레그램 텍스트 전송 실패: {e}")
+
+
 def _send_reply(chat_id: str, reply_to_id: int, text: str) -> None:
     try:
         requests.post(
@@ -117,6 +128,41 @@ def _send_to_pc(src: Path, label: str, ts: str) -> bool:
     except Exception as e:
         log.error(f"PC 전송 실패: {e}")
         return False
+
+
+# ── 배경 갱신 ─────────────────────────────────────────────────────────────────
+def _update_background(reason: str) -> None:
+    global background_gray
+    with frame_lock:
+        frame = latest_frame.copy() if latest_frame is not None else None
+    if frame is None:
+        _send_text("⚠️ 배경 갱신 실패: 카메라 프레임 없음")
+        return
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite(str(BACKGROUND_PATH), frame)
+    with background_lock:
+        background_gray = gray
+    log.info(f"배경 갱신 완료 ({reason})")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(str(BACKGROUND_PATH), "rb") as photo:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT, "caption": f"🔄 배경 갱신 ({reason})\n{now_str}"},
+                files={"photo": photo},
+                timeout=10,
+            )
+    except Exception as e:
+        log.error(f"배경 갱신 알림 실패: {e}")
+
+
+def background_update_loop() -> None:
+    while True:
+        now = datetime.now()
+        seconds_until_next_hour = (60 - now.minute) * 60 - now.second
+        log.info(f"다음 배경 갱신: {seconds_until_next_hour // 60}분 후 (정시)")
+        time.sleep(seconds_until_next_hour)
+        _update_background("정시 갱신")
 
 
 # ── 이미지 정리 ───────────────────────────────────────────────────────────────
@@ -269,10 +315,6 @@ def _process_update(update: dict) -> None:
     if not msg:
         return
 
-    reply_to = msg.get("reply_to_message")
-    if not reply_to:
-        return
-
     text = (msg.get("text") or "").strip()
     if not text:
         return
@@ -282,6 +324,13 @@ def _process_update(update: dict) -> None:
         return
 
     msg_id = msg["message_id"]
+    reply_to = msg.get("reply_to_message")
+
+    if text == "갱신":
+        _send_reply(chat_id, msg_id, "🔄 배경 갱신 중...")
+        threading.Thread(target=_update_background, args=("수동 갱신",), daemon=True).start()
+        return
+
     ref_id = reply_to.get("message_id")
 
     # message_id 로 이미지 경로 조회, 없으면 caption 에서 파싱 (재시작 대비)
@@ -352,6 +401,7 @@ def main() -> None:
     OFFSET_FILE.parent.mkdir(exist_ok=True)
 
     threading.Thread(target=telegram_bot_loop, daemon=True).start()
+    threading.Thread(target=background_update_loop, daemon=True).start()
     camera_loop()
 
 
