@@ -74,11 +74,11 @@ def _frame_diff(a, b) -> int:
 
 
 # ── 텔레그램 ──────────────────────────────────────────────────────────────────
-def _send_photo(image_path: str, ts: str, detect_px: int, detect_pct: float, after_px: int, after_pct: float):
+def _send_photo(image_path: str, ts: str, d_detect: int, p_detect: float, d_after: int, p_after: float):
     caption = (
         f"[동작 감지] {ts}\n"
-        f"감지: {detect_px:,}px ({detect_pct:.1f}%)\n"
-        f"캡처: {after_px:,}px ({after_pct:.1f}%)\n\n"
+        f"감지→캡처: {d_detect:,}px ({p_detect:.1f}%)\n"
+        f"캡처→배경: {d_after:,}px ({p_after:.1f}%)\n\n"
         f"1사람 2택배 3조명변화 4오감지 5비닐봉지 6기타"
     )
     try:
@@ -202,13 +202,15 @@ def _cleanup_images(keep: int = 50) -> None:
 
 
 # ── 이벤트 처리 ───────────────────────────────────────────────────────────────
-def handle_event(ts: str, detect_px: int, total_px: int) -> None:
+def handle_event(ts: str, detect_frame, total_px: int) -> None:
     log.info(f"이벤트: {ts} — {CAPTURE_DELAY}초 후 캡처")
+    detect_gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
+
     time.sleep(CAPTURE_DELAY)
 
     with frame_lock:
-        frame = latest_frame.copy() if latest_frame is not None else None
-    if frame is None:
+        after_frame = latest_frame.copy() if latest_frame is not None else None
+    if after_frame is None:
         return
 
     with background_lock:
@@ -216,24 +218,23 @@ def handle_event(ts: str, detect_px: int, total_px: int) -> None:
     if bg is None:
         return
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    after_px = _frame_diff(bg, gray)
+    after_gray = cv2.cvtColor(after_frame, cv2.COLOR_BGR2GRAY)
+    d_detect = _frame_diff(detect_gray, after_gray)   # 감지 시 vs 2초 후
+    d_after  = _frame_diff(bg, after_gray)             # 2초 후 vs 배경
 
-    if after_px <= CONFIRM_THRESHOLD:
-        log.info(f"재확인 변화 없음 ({after_px}px) — 건너뜀")
+    if d_after <= CONFIRM_THRESHOLD:
+        log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
         with event_time_lock:
             global last_event_cooldown
             last_event_cooldown = COOLDOWN_NO_ALERT
         return
 
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
-    cv2.imwrite(after_path, frame)
-    log.info(f"저장: {after_path}")
+    cv2.imwrite(after_path, after_frame)
+    log.info(f"저장: {after_path} (감지→캡처:{d_detect}px, 캡처→배경:{d_after}px)")
     _cleanup_images()
 
-    detect_pct = detect_px / total_px * 100
-    after_pct = after_px / total_px * 100
-    msg_id = _send_photo(after_path, ts, detect_px, detect_pct, after_px, after_pct)
+    msg_id = _send_photo(after_path, ts, d_detect, d_detect / total_px * 100, d_after, d_after / total_px * 100)
     if msg_id is not None:
         with _sent_photo_lock:
             _sent_photo_map[msg_id] = after_path
@@ -309,7 +310,7 @@ def camera_loop() -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pct = changed / total * 100
         log.info(f"동작 감지: {changed:,}px ({pct:.1f}%) — {ts}")
-        threading.Thread(target=handle_event, args=(ts, changed, total), daemon=True).start()
+        threading.Thread(target=handle_event, args=(ts, frame.copy(), total), daemon=True).start()
 
         time.sleep(0.05)
 
