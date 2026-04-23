@@ -44,7 +44,7 @@ IMAGES_DIR      = Path("images")
 BACKGROUND_PATH = IMAGES_DIR / "background.jpg"
 OFFSET_FILE     = Path("dataset") / ".offset"
 
-VALID_LABELS = {"사람", "택배", "동물", "차량", "비닐봉지", "기타", "오감지", "조명변화"}
+VALID_LABELS = {"사람", "택배", "비닐봉지", "기타", "오감지", "조명변화"}
 _TS_RE = re.compile(r"\[동작 감지\] (\d{8}_\d{6})")
 
 # ── 공유 상태 ──────────────────────────────────────────────────────────────────
