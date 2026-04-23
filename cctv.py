@@ -36,6 +36,7 @@ STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
 MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
 LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율
 CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
+DETECT_DIFF_THRESHOLD = int(os.getenv("DETECT_DIFF_THRESHOLD", 0))
 CAPTURE_DELAY           = int(os.getenv("CAPTURE_DELAY", 2))
 COOLDOWN_ALERT          = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT       = int(os.getenv("COOLDOWN_NO_ALERT", 10))
@@ -341,16 +342,18 @@ def analyze(after_path: str) -> str:
         return analyze_with_claude(after_path)
 
 
-# ── 이벤트 처리 (동작 감지 후 5초 대기 → 분석 → 알림) ────────────────────────
-def handle_event(ts: str, detect_pixels: int, total_pixels: int) -> None:
+# ── 이벤트 처리 ───────────────────────────────────────────────────────────────
+def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -> None:
     global last_event_cooldown, consecutive_alerts, continuous_start, last_confirmed_time
-    detect_pct = detect_pixels / total_pixels * 100
     log.info(f"이벤트 시작: {ts} — {CAPTURE_DELAY}초 후 캡처")
+
+    detect_gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
+    detect_gray = cv2.GaussianBlur(detect_gray, (21, 21), 0)
+
     time.sleep(CAPTURE_DELAY)
 
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
-
     if frame is None:
         log.warning("after 프레임 없음 — 이벤트 취소")
         return
@@ -358,27 +361,38 @@ def handle_event(ts: str, detect_pixels: int, total_pixels: int) -> None:
     with background_lock:
         bg = background_gray
 
-    if bg is not None:
-        after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
-        diff = _frame_diff(bg, after_gray)
-        log.info(f"3초 후 diff: {diff} (임계값: {CONFIRM_THRESHOLD})")
-        if diff <= CONFIRM_THRESHOLD:
-            log.info(f"3초 후 변화 없음 — 알림 건너뜀 ({ts})")
-            with alert_state_lock:
-                consecutive_alerts = 0
-                continuous_start = 0.0
-                last_confirmed_time = 0.0
-            with event_time_lock:
-                last_event_cooldown = COOLDOWN_NO_ALERT
-            return
+    after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
+
+    d_detect = _frame_diff(detect_gray, after_gray)
+    d_after  = _frame_diff(bg, after_gray) if bg is not None else 0
+    log.info(f"감지→캡처: {d_detect}px, 캡처→배경: {d_after}px (임계값: {CONFIRM_THRESHOLD})")
+
+    if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
+        log.info(f"감지→캡처 변화 없음 ({d_detect}px) — 건너뜀")
+        with alert_state_lock:
+            consecutive_alerts = 0
+            continuous_start = 0.0
+            last_confirmed_time = 0.0
+        with event_time_lock:
+            last_event_cooldown = COOLDOWN_NO_ALERT
+        return
+
+    if d_after <= CONFIRM_THRESHOLD:
+        log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
+        with alert_state_lock:
+            consecutive_alerts = 0
+            continuous_start = 0.0
+            last_confirmed_time = 0.0
+        with event_time_lock:
+            last_event_cooldown = COOLDOWN_NO_ALERT
+        return
 
     with event_time_lock:
         last_event_cooldown = COOLDOWN_ALERT
 
     now = time.time()
     with alert_state_lock:
-        # 마지막 감지로부터 쿨다운의 3배 이상 지났으면 연속이 끊긴 것으로 판단
         gap = now - last_confirmed_time if last_confirmed_time > 0 else 0
         if gap > COOLDOWN_ALERT * 3:
             continuous_start = now
@@ -390,13 +404,11 @@ def handle_event(ts: str, detect_pixels: int, total_pixels: int) -> None:
         count = consecutive_alerts
         elapsed = now - continuous_start
 
-    # 3분 연속 감지 → 배경 강제 갱신
     if elapsed >= CONTINUOUS_BG_MINUTES * 60:
         log.info(f"연속 감지 {CONTINUOUS_BG_MINUTES}분 경과 — 배경 강제 갱신")
         _force_bg_update(f"연속 감지 {CONTINUOUS_BG_MINUTES}분")
         return
 
-    # 연속 알림 횟수 초과 시 텔레그램 건너뜀
     if count > CONTINUOUS_ALERT_LIMIT:
         log.info(f"연속 알림 {count}회 — 텔레그램 건너뜀 (최대 {CONTINUOUS_ALERT_LIMIT}회)")
         return
@@ -405,17 +417,10 @@ def handle_event(ts: str, detect_pixels: int, total_pixels: int) -> None:
     cv2.imwrite(after_path, frame)
     log.info(f"after 저장: {after_path}")
 
-    after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
-    with background_lock:
-        bg2 = background_gray
-    after_diff = _frame_diff(bg2, after_gray) if bg2 is not None else 0
-    after_pct = after_diff / total_pixels * 100
-
     # analysis = analyze(after_path)
     caption = (
-        f"감지: {detect_pixels:,}px ({detect_pct:.1f}%)\n"
-        f"캡처: {after_diff:,}px ({after_pct:.1f}%)"
+        f"감지→캡처: {d_detect:,}px ({d_detect / total_pixels * 100:.1f}%)\n"
+        f"캡처→배경: {d_after:,}px ({d_after / total_pixels * 100:.1f}%)"
     )
     send_telegram(after_path, caption, ts)
 
@@ -432,12 +437,14 @@ def cleanup_images(keep: int = 50) -> None:
 def background_update_loop() -> None:
     global background_gray, consecutive_alerts, continuous_start, next_bg_update_time
 
-    # 첫 실행은 interval 후 시작
-    next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
-    for _ in range(BG_UPDATE_INTERVAL // 60):
-        time.sleep(60)
+    # 시작 시 즉시 갱신
+    while latest_frame is None:
+        time.sleep(0.5)
+    _force_bg_update("시작 시 갱신")
 
     while True:
+        for _ in range(BG_UPDATE_INTERVAL // 60):
+            time.sleep(60)
         with frame_lock:
             candidate = latest_frame.copy() if latest_frame is not None else None
 
@@ -487,9 +494,6 @@ def background_update_loop() -> None:
         next_bg_update_time = time.time() + BG_UPDATE_INTERVAL
         _send_photo_bytes(save_frame, f"🔄 배경 이미지 정기 갱신 완료 ({datetime.now().strftime('%H:%M')})")
         log.info("배경 이미지 자동 갱신 완료")
-
-        for _ in range(BG_UPDATE_INTERVAL // 60):
-            time.sleep(60)
 
 
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
@@ -559,7 +563,7 @@ def camera_loop() -> None:
             log.info(f"동작 감지! 변화 픽셀: {changed} ({pct:.1f}%) — {ts}")
             send_telegram_text(f"🔍 동작 감지\n{changed:,}px ({pct:.1f}%)")
 
-            threading.Thread(target=handle_event, args=(ts, changed, total_pixels), daemon=True).start()
+            threading.Thread(target=handle_event, args=(ts, frame.copy(), changed, total_pixels), daemon=True).start()
 
         time.sleep(0.05)
 
