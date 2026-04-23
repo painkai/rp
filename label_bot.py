@@ -204,6 +204,7 @@ def _cleanup_images(keep: int = 50) -> None:
 
 # ── 이벤트 처리 ───────────────────────────────────────────────────────────────
 def handle_event(ts: str, detect_frame, total_px: int) -> None:
+    global last_event_cooldown
     log.info(f"이벤트: {ts} — {CAPTURE_DELAY}초 후 캡처")
     detect_gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
 
@@ -232,7 +233,6 @@ def handle_event(ts: str, detect_frame, total_px: int) -> None:
     if d_after <= CONFIRM_THRESHOLD:
         log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
         with event_time_lock:
-            global last_event_cooldown
             last_event_cooldown = COOLDOWN_NO_ALERT
         return
 
