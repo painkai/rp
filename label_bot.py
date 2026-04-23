@@ -7,7 +7,8 @@
 
 동작:
   cctv.py 가 전송한 동작 감지 사진에 텔레그램으로 reply 하면
-  해당 이미지와 라벨을 dataset/ 에 저장합니다.
+  이미지를 텔레그램에서 직접 다운로드해 dataset/ 에 저장합니다.
+  PC 에서 실행하면 라즈베리파이 파일시스템 접근 없이 동작합니다.
 
 주의:
   cctv.py 와 같은 봇 토큰을 사용하므로, 동시에 실행하면
@@ -18,7 +19,6 @@ import os
 import sys
 import json
 import re
-import shutil
 import time
 import logging
 import requests
@@ -37,7 +37,6 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
 
-IMAGES_DIR  = Path("images")
 DATASET_DIR = Path("dataset")
 LABELS_FILE = DATASET_DIR / "labels.jsonl"
 OFFSET_FILE = DATASET_DIR / ".offset"
@@ -87,10 +86,33 @@ def _send_reply(chat_id: str, reply_to_id: int, text: str) -> None:
         log.error(f"sendMessage 실패: {e}")
 
 
-def _save_label(src: Path, label: str, ts: str) -> None:
+def _download_photo(photo_sizes: list, dest: Path) -> bool:
+    file_id = photo_sizes[-1]["file_id"]
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        file_path = r.json()["result"]["file_path"]
+        img = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+            timeout=30,
+        )
+        img.raise_for_status()
+        dest.write_bytes(img.content)
+        return True
+    except Exception as e:
+        log.error(f"사진 다운로드 실패: {e}")
+        return False
+
+
+def _save_label(photo_sizes: list, label: str, ts: str) -> bool:
     dest_name = f"{ts}_{label}.jpg"
     dest = DATASET_DIR / dest_name
-    shutil.copy2(src, dest)
+    if not _download_photo(photo_sizes, dest):
+        return False
     entry = {
         "file": dest_name,
         "label": label,
@@ -100,6 +122,7 @@ def _save_label(src: Path, label: str, ts: str) -> None:
     with LABELS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     log.info(f"라벨 저장: {dest_name} ({label})")
+    return True
 
 
 def _process(update: dict) -> None:
@@ -127,18 +150,20 @@ def _process(update: dict) -> None:
     ts = m.group(1)
     msg_id = msg["message_id"]
 
+    photo_sizes = reply_to.get("photo")
+    if not photo_sizes:
+        _send_reply(chat_id, msg_id, "원본 메시지에서 사진을 찾을 수 없습니다.")
+        return
+
     if text not in VALID_LABELS:
         _send_reply(chat_id, msg_id,
                     f"알 수 없는 라벨입니다.\n사용 가능: {', '.join(sorted(VALID_LABELS))}")
         return
 
-    src = IMAGES_DIR / f"after_{ts}.jpg"
-    if not src.exists():
-        _send_reply(chat_id, msg_id, f"이미지를 찾을 수 없습니다: after_{ts}.jpg")
-        return
-
-    _save_label(src, text, ts)
-    _send_reply(chat_id, msg_id, f"✅ 라벨 저장: {text}")
+    if _save_label(photo_sizes, text, ts):
+        _send_reply(chat_id, msg_id, f"✅ 라벨 저장: {text}")
+    else:
+        _send_reply(chat_id, msg_id, "저장 실패 — 로그를 확인하세요.")
 
 
 def main() -> None:
