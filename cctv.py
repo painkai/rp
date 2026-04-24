@@ -368,19 +368,8 @@ def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -
     d_after  = _frame_diff(bg, after_gray) if bg is not None else 0
     log.info(f"감지→캡처: {d_detect}px, 캡처→배경: {d_after}px (임계값: {CONFIRM_THRESHOLD})")
 
-    # 캡처 즉시 전송 (필터 여부와 무관)
-    after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
-    cv2.imwrite(after_path, frame)
-    caption = (
-        f"감지→캡처: {d_detect:,}px ({d_detect / total_pixels * 100:.1f}%)\n"
-        f"캡처→배경: {d_after:,}px ({d_after / total_pixels * 100:.1f}%)"
-    )
-    send_telegram(after_path, caption, ts)
-    cleanup_images()
-
-    # 이하는 상태 관리 (쿨다운·연속 감지)
     if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
-        log.info(f"감지→캡처 변화 없음 ({d_detect}px)")
+        log.info(f"감지→캡처 변화 없음 ({d_detect}px) — 건너뜀")
         with alert_state_lock:
             consecutive_alerts = 0
             continuous_start = 0.0
@@ -390,7 +379,7 @@ def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -
         return
 
     if d_after <= CONFIRM_THRESHOLD:
-        log.info(f"캡처→배경 변화 없음 ({d_after}px)")
+        log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
         with alert_state_lock:
             consecutive_alerts = 0
             continuous_start = 0.0
@@ -417,6 +406,18 @@ def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -
     if elapsed >= CONTINUOUS_BG_MINUTES * 60:
         log.info(f"연속 감지 {CONTINUOUS_BG_MINUTES}분 경과 — 배경 강제 갱신")
         _force_bg_update(f"연속 감지 {CONTINUOUS_BG_MINUTES}분")
+        return
+
+    after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
+    cv2.imwrite(after_path, frame)
+    log.info(f"after 저장: {after_path}")
+
+    caption = (
+        f"감지→캡처: {d_detect:,}px ({d_detect / total_pixels * 100:.1f}%)\n"
+        f"캡처→배경: {d_after:,}px ({d_after / total_pixels * 100:.1f}%)"
+    )
+    send_telegram(after_path, caption, ts)
+    cleanup_images()
 
 
 def cleanup_images(keep: int = 50) -> None:
@@ -553,8 +554,6 @@ def camera_loop() -> None:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             pct = changed / total_pixels * 100
             log.info(f"동작 감지! 변화 픽셀: {changed} ({pct:.1f}%) — {ts}")
-            send_telegram_text(f"🔍 동작 감지\n{changed:,}px ({pct:.1f}%)")
-
             threading.Thread(target=handle_event, args=(ts, frame.copy(), changed, total_pixels), daemon=True).start()
 
         time.sleep(0.05)

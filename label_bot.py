@@ -228,7 +228,18 @@ def handle_event(ts: str, detect_frame, total_px: int) -> None:
     d_detect = _frame_diff(detect_gray, after_gray)
     d_after  = _frame_diff(bg, after_gray)
 
-    # 캡처 즉시 전송 (필터 여부와 무관)
+    if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
+        log.info(f"감지→캡처 변화 없음 ({d_detect}px) — 건너뜀")
+        with event_time_lock:
+            last_event_cooldown = COOLDOWN_NO_ALERT
+        return
+
+    if d_after <= CONFIRM_THRESHOLD:
+        log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
+        with event_time_lock:
+            last_event_cooldown = COOLDOWN_NO_ALERT
+        return
+
     after_path = str(IMAGES_DIR / f"after_{ts}.jpg")
     cv2.imwrite(after_path, after_frame)
     log.info(f"저장: {after_path} (감지→캡처:{d_detect}px, 캡처→배경:{d_after}px)")
@@ -238,19 +249,6 @@ def handle_event(ts: str, detect_frame, total_px: int) -> None:
     if msg_id is not None:
         with _sent_photo_lock:
             _sent_photo_map[msg_id] = after_path
-
-    # 이하는 쿨다운 상태 관리
-    if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
-        log.info(f"감지→캡처 변화 없음 ({d_detect}px)")
-        with event_time_lock:
-            last_event_cooldown = COOLDOWN_NO_ALERT
-        return
-
-    if d_after <= CONFIRM_THRESHOLD:
-        log.info(f"캡처→배경 변화 없음 ({d_after}px)")
-        with event_time_lock:
-            last_event_cooldown = COOLDOWN_NO_ALERT
-        return
 
     with event_time_lock:
         last_event_cooldown = COOLDOWN_ALERT
