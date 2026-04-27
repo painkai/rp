@@ -6,6 +6,7 @@ import base64
 import threading
 import requests
 import logging
+from collections import deque
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
@@ -33,11 +34,14 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 STREAM_PORT     = int(os.getenv("STREAM_PORT", 5000))
-MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))
-LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율
-CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))
-DETECT_DIFF_THRESHOLD = int(os.getenv("DETECT_DIFF_THRESHOLD", 0))
+MOTION_THRESHOLD    = int(os.getenv("MOTION_THRESHOLD", 3000))    # MOG2 전경 픽셀 수 트리거
+LIGHTING_THRESHOLD  = float(os.getenv("LIGHTING_THRESHOLD", 0.6))  # 전체 프레임 비율 (급격한 조명 변화 필터)
+CONFIRM_THRESHOLD   = int(os.getenv("CONFIRM_THRESHOLD", 1000))     # 링버퍼 비교 확인 임계값
 CAPTURE_DELAY           = int(os.getenv("CAPTURE_DELAY", 2))
+MOG2_VAR_THRESHOLD  = int(os.getenv("MOG2_VAR_THRESHOLD", 50))     # 높을수록 덜 민감
+MOG2_HISTORY        = int(os.getenv("MOG2_HISTORY", 1000))          # 배경 모델 학습 프레임 수 (~50초 @ 20fps)
+RING_BUFFER_SECONDS = int(os.getenv("RING_BUFFER_SECONDS", 30))     # 비교 기준 과거 시점(초)
+RING_SAMPLE_INTERVAL = float(os.getenv("RING_SAMPLE_INTERVAL", 1.0)) # 링버퍼 저장 간격(초)
 COOLDOWN_ALERT          = int(os.getenv("COOLDOWN_ALERT", 30))
 COOLDOWN_NO_ALERT       = int(os.getenv("COOLDOWN_NO_ALERT", 10))
 BG_UPDATE_INTERVAL      = int(os.getenv("BG_UPDATE_INTERVAL", 7200))
@@ -71,6 +75,16 @@ last_confirmed_time = 0.0
 alert_state_lock = threading.Lock()
 
 next_bg_update_time = 0.0
+
+# MOG2 적응형 배경 모델 (조명 변화에 강함)
+mog2 = cv2.createBackgroundSubtractorMOG2(
+    history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
+)
+
+# 링버퍼: (timestamp, frame) — 매 RING_SAMPLE_INTERVAL초 저장, RING_BUFFER_SECONDS 보관
+frame_ring_buffer: deque = deque()
+ring_buffer_lock = threading.Lock()
+last_ring_save_time = 0.0
 
 
 def _force_bg_update(reason: str) -> None:
@@ -343,12 +357,9 @@ def analyze(after_path: str) -> str:
 
 
 # ── 이벤트 처리 ───────────────────────────────────────────────────────────────
-def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -> None:
+def handle_event(ts: str, event_time: float, detect_pixels: int, total_pixels: int) -> None:
     global last_event_cooldown, consecutive_alerts, continuous_start, last_confirmed_time
     log.info(f"이벤트 시작: {ts} — {CAPTURE_DELAY}초 후 캡처")
-
-    detect_gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
-    detect_gray = cv2.GaussianBlur(detect_gray, (21, 21), 0)
 
     time.sleep(CAPTURE_DELAY)
 
@@ -358,28 +369,37 @@ def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -
         log.warning("after 프레임 없음 — 이벤트 취소")
         return
 
-    with background_lock:
-        bg = background_gray
-
     after_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     after_gray = cv2.GaussianBlur(after_gray, (21, 21), 0)
 
-    d_detect = _frame_diff(detect_gray, after_gray)
-    d_after  = _frame_diff(bg, after_gray) if bg is not None else 0
-    log.info(f"감지→캡처: {d_detect}px, 캡처→배경: {d_after}px (임계값: {CONFIRM_THRESHOLD})")
+    # 링버퍼에서 RING_BUFFER_SECONDS 전 프레임 조회 (가장 최근의 "충분히 오래된" 프레임)
+    ref_frame = None
+    with ring_buffer_lock:
+        for rb_ts, f in frame_ring_buffer:
+            if event_time - rb_ts >= RING_BUFFER_SECONDS:
+                ref_frame = f
+            else:
+                break
 
-    if DETECT_DIFF_THRESHOLD > 0 and d_detect <= DETECT_DIFF_THRESHOLD:
-        log.info(f"감지→캡처 변화 없음 ({d_detect}px) — 건너뜀")
-        with alert_state_lock:
-            consecutive_alerts = 0
-            continuous_start = 0.0
-            last_confirmed_time = 0.0
-        with event_time_lock:
-            last_event_cooldown = COOLDOWN_NO_ALERT
-        return
+    if ref_frame is not None:
+        ref_gray = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
+        ref_gray = cv2.GaussianBlur(ref_gray, (21, 21), 0)
+        d_confirm = _frame_diff(ref_gray, after_gray)
+        ref_label = f"링버퍼({RING_BUFFER_SECONDS}초 전)"
+    else:
+        # 링버퍼가 아직 채워지지 않은 경우 배경으로 fallback
+        with background_lock:
+            bg = background_gray
+        if bg is None:
+            log.warning("링버퍼/배경 없음 — 이벤트 취소")
+            return
+        d_confirm = _frame_diff(bg, after_gray)
+        ref_label = "배경(fallback)"
 
-    if d_after <= CONFIRM_THRESHOLD:
-        log.info(f"캡처→배경 변화 없음 ({d_after}px) — 건너뜀")
+    log.info(f"{ref_label}→캡처: {d_confirm}px (임계값: {CONFIRM_THRESHOLD})")
+
+    if d_confirm <= CONFIRM_THRESHOLD:
+        log.info(f"변화 없음 ({d_confirm}px) — 건너뜀")
         with alert_state_lock:
             consecutive_alerts = 0
             continuous_start = 0.0
@@ -413,8 +433,8 @@ def handle_event(ts: str, detect_frame, detect_pixels: int, total_pixels: int) -
     log.info(f"after 저장: {after_path}")
 
     caption = (
-        f"감지→캡처: {d_detect:,}px ({d_detect / total_pixels * 100:.1f}%)\n"
-        f"캡처→배경: {d_after:,}px ({d_after / total_pixels * 100:.1f}%)"
+        f"MOG2 감지: {detect_pixels:,}px ({detect_pixels / total_pixels * 100:.1f}%)\n"
+        f"{ref_label}→캡처: {d_confirm:,}px ({d_confirm / total_pixels * 100:.1f}%)"
     )
     send_telegram(after_path, caption, ts)
     cleanup_images()
@@ -491,7 +511,7 @@ def background_update_loop() -> None:
 
 # ── 카메라 캡처 + 동작 감지 루프 ──────────────────────────────────────────────
 def camera_loop() -> None:
-    global latest_frame, background_gray, last_event_time, last_event_cooldown, consecutive_alerts, continuous_start
+    global latest_frame, background_gray, last_event_time, last_event_cooldown, consecutive_alerts, continuous_start, last_ring_save_time
 
     cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -537,15 +557,25 @@ def camera_loop() -> None:
             time.sleep(0.05)
             continue
 
-        # 동작 감지
+        # MOG2 동작 감지 (조명 변화 자동 적응)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
-        changed = _frame_diff(bg, gray)
+        fg_mask = mog2.apply(gray)
+        changed = cv2.countNonZero(fg_mask)
         total_pixels = frame.shape[0] * frame.shape[1]
 
         if changed / total_pixels > LIGHTING_THRESHOLD:
+            # 전체 프레임의 대부분이 전경 → 급격한 조명 변화로 판단, 무시
             time.sleep(0.05)
-            continue  # 전체 프레임 변화 → 조명 변화로 판단, 무시
+            continue
+
+        # 링버퍼에 프레임 저장 (RING_SAMPLE_INTERVAL초마다)
+        if now - last_ring_save_time >= RING_SAMPLE_INTERVAL:
+            with ring_buffer_lock:
+                frame_ring_buffer.append((now, frame.copy()))
+                cutoff = now - RING_BUFFER_SECONDS - 10
+                while frame_ring_buffer and frame_ring_buffer[0][0] < cutoff:
+                    frame_ring_buffer.popleft()
+            last_ring_save_time = now
 
         if changed > MOTION_THRESHOLD:
             with event_time_lock:
@@ -553,8 +583,8 @@ def camera_loop() -> None:
                 last_event_cooldown = COOLDOWN_NO_ALERT  # handle_event에서 확정
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             pct = changed / total_pixels * 100
-            log.info(f"동작 감지! 변화 픽셀: {changed} ({pct:.1f}%) — {ts}")
-            threading.Thread(target=handle_event, args=(ts, frame.copy(), changed, total_pixels), daemon=True).start()
+            log.info(f"동작 감지! MOG2 전경 픽셀: {changed} ({pct:.1f}%) — {ts}")
+            threading.Thread(target=handle_event, args=(ts, now, changed, total_pixels), daemon=True).start()
 
         time.sleep(0.05)
 
